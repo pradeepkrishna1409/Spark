@@ -1,0 +1,55 @@
+
+from __future__ import print_function
+import sys
+import json
+from pyspark import SparkContext
+from pyspark.streaming import StreamingContext
+from pyspark.streaming.kafka import KafkaUtils
+from kafka import KafkaProducer
+
+# list OFAC countries. In future, pull from a reference table
+ofac_countries = ["Balkans", "Belarus","Burma","Cote D'Ivoire","Cuba","Democratic Republic of Congo","Iran","Iraq","Liberia","North Korea","Sudan","Syria","Zimbabwe"]
+
+# Set producer where Spark script will publish back to Kafka
+producer = KafkaProducer(bootstrap_servers='d53bdaedg001t0x:9092')
+
+# Define function to handle publishing to kafka
+def handler(message):
+    records = message.collect()
+    for record in records:
+        producer.send('party', str(record))
+        producer.flush()
+        
+        
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Usage: kafka_wordcount.py <zk> <topic>", file=sys.stderr)
+        exit(-1)
+
+    sc = SparkContext(appName="PythonStreamingKafkaWordCountJSON")
+    ssc = StreamingContext(sc, 4)
+    sc.setLogLevel("ERROR")
+
+    zkQuorum, topic = sys.argv[1:]
+    kvs = KafkaUtils.createStream(ssc, zkQuorum, "spark-streaming-consumer", {topic: 1})
+
+    parsed = kvs.map(lambda v: json.loads(v[1]))  # doesn't work on multi-line json. In future, control for null kafka messages
+    
+    # Identify which country is listed in customer address. In future, control for upper/lower case
+    country_dstream = parsed.map(lambda json_data: json_data['AddKycInfo']['KycInfo']['AdditionalKycInfo']['Property'][4]['PropertyValue'])
+    
+    # Compare country to OFAC country list. Create alert depending on result.
+    output_dstream = country_dstream.map(lambda country: "ALERT: " + country + " is on the OFAC list. Reject customer onboarding!" if country in ofac_countries else "Country: " + country + " is not on the OFAC list")
+
+    # Print alert to output in pyspark shell
+    output_dstream.pprint()
+    
+    # Save alert as text file in hdfs
+    #output_dstream.saveAsTextFiles("real_time/kyc_ofac_alerts")
+    
+    # Publish alert back to Kafka
+    output_dstream.foreachRDD(handler)
+
+
+    ssc.start()
+    ssc.awaitTermination()
