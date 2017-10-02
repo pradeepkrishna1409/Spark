@@ -1,0 +1,329 @@
+############################################################################################################### 
+##################################################   pyspark  ############################################### 
+
+##############################################################################
+# word count program
+
+data = sc.textFile("/user/cloudera/wordcount.txt")
+dataFlatMap = data.flatMap(lambda x: x.split(" "))
+dataMap = dataFlatMap.map(lambda x: (x, 1))
+dataReduceByKey = dataMap.reduceByKey(lambda x,y: x + y)
+
+dataReduceByKey.saveAsTextFile("/user/cloudera/wordcountoutput")
+
+for i in dataReduceByKey.collect():
+  print(i)
+
+##############################################################################
+# Join disparate datasets together using Spark
+
+ordersRDD = sc.textFile("/loudacre/itversity/orders.txt")
+orderItemsRDD = sc.textFile("/loudacre/itversity/order_items.txt")
+
+ordersParsedRDD = ordersRDD.map(lambda rec: (int(rec.split(",")[0]), rec))
+orderItemsParsedRDD = orderItemsRDD.map(lambda rec: (int(rec.split(",")[1]), rec))
+
+ordersJoinOrderItems = orderItemsParsedRDD.join(ordersParsedRDD)
+revenuePerOrderPerDay = ordersJoinOrderItems.map(lambda t: (t[1][1].split(",")[1], float(t[1][0].split(",")[4])))
+
+# Get order count per day
+ordersPerDay = ordersJoinOrderItems.map(lambda rec: rec[1][1].split(",")[1] + "," + str(rec[0])).distinct()
+ordersPerDayParsedRDD = ordersPerDay.map(lambda rec: (rec.split(",")[0], 1))
+totalOrdersPerDay = ordersPerDayParsedRDD.reduceByKey(lambda x, y: x + y)
+
+# Get revenue per day from joined data
+totalRevenuePerDay = revenuePerOrderPerDay.reduceByKey( \
+lambda total1, total2: total1 + total2 \
+)
+
+for data in totalRevenuePerDay.collect():
+  print(data)
+
+# Joining order count per day and revenue per day
+finalJoinRDD = totalOrdersPerDay.join(totalRevenuePerDay)
+for data in finalJoinRDD.take(5):
+  print(data)
+
+
+ordersRDD = sc.textFile("/loudacre/itversity/orders.txt")
+ordersMap = ordersRDD.map(lambda o: o.split(","))
+orders = ordersMap.map(lambda o: Row(order_id=int(o[0]), order_date=o[1], \
+order_customer_id=int(o[2]), order_status=o[3]))
+ordersSchema = sqlContext.inferSchema(orders)
+ordersSchema.registerTempTable("orders")
+
+orderItemsRDD = sc.textFile("/loudacre/itversity/order_items.txt")
+orderItemsMap = orderItemsRDD.map(lambda oi: oi.split(","))
+orderItems = orderItemsMap.map(lambda oi: Row(order_item_id=int(oi[0]), order_item_order_id=int(oi[1]), \
+order_item_product_id=int(oi[2]), order_item_quantity=int(oi[3]), order_item_subtotal=float(oi[4]), \
+order_item_product_price=float(oi[5])))
+orderItemsSchema = sqlContext.inferSchema(orderItems)
+orderItemsSchema.registerTempTable("order_items")
+
+joinAggData = sqlContext.sql("select o.order_date, sum(oi.order_item_subtotal), \
+count(distinct o.order_id) from orders o join order_items oi \
+on o.order_id = oi.order_item_order_id \
+group by o.order_date order by o.order_date")
+
+for data in joinAggData.collect():
+  print(data)
+
+##############################################################################
+
+# Calculate aggregate statistics (e.g., average or sum) using Spark
+#sum
+ordersRDD = sc.textFile("/loudacre/itversity/orders.txt")
+ordersRDD.count()
+
+orderItemsRDD = sc.textFile("/loudacre/itversity/order_items.txt")
+orderItemsMap = orderItemsRDD.map(lambda rec: float(rec.split(",")[4]))
+for i in orderItemsMap.take(5):
+  print i
+
+orderItemsReduce = orderItemsMap.reduce(lambda rev1, rev2: rev1 + rev2)
+
+#Get max priced product from products table
+#There is one record which is messing up default , delimiters
+#Clean it up (we will see how we can filter with out deleting the record later)
+hadoop fs -get /user/cloudera/sqoop_import/products
+#Delete the record with product_id 685
+hadoop fs -put -f products/part* /user/cloudera/sqoop_import/products
+
+#pyspark script to get the max priced product
+productsRDD = sc.textFile("/user/cloudera/sqoop_import/products")
+productsMap = productsRDD.map(lambda rec: rec)
+productsMap.reduce(lambda rec1, rec2: (rec1 if((rec1.split(",")[4] != "" and rec2.split(",")[4] != "") and float(rec1.split(",")[4]) >= float(rec2.split(",")[4])) else rec2))
+
+#avg
+revenue = sc.textFile("/loudacre/itversity/order_items.txt").map(lambda rec: float(rec.split(",")[4])).reduce(lambda rev1, rev2: rev1 + rev2)
+totalOrders = sc.textFile("/loudacre/itversity/order_items.txt").map(lambda rec: int(rec.split(",")[1])).distinct().count()
+
+#Number of orders by status
+ordersRDD = sc.textFile("/loudacre/itversity/orders.txt")
+ordersMap = ordersRDD.map(lambda rec:  (rec.split(",")[3], 1))
+for i in ordersMap.countByKey().items(): print(i)
+#groupByKey is not very efficient
+ordersByStatus = ordersMap.groupByKey().map(lambda t: (t[0], sum(t[1])))
+ordersByStatus = ordersMap.reduceByKey(lambda acc, value: acc + value)
+ordersMap = ordersRDD.map(lambda rec:  (rec.split(",")[3], rec))
+ordersByStatus = ordersMap.aggregateByKey(0, lambda acc, value: acc+1, lambda acc, value: acc+value)
+ordersByStatus = ordersMap.combineByKey(lambda value: 1, lambda acc, value: acc+1, lambda acc, value: acc+value)
+
+for recs in ordersByStatus.collect():
+  print(recs)
+
+#Number of orders by order date and order status
+#Key orderDate and orderStatus
+ordersRDD = sc.textFile("/loudacre/itversity/orders.txt")
+ordersMapRDD = ordersRDD.map(lambda rec: ((rec.split(",")[1], rec.split(",")[3]), 1))
+ordersByStatusPerDay = ordersMapRDD.reduceByKey(lambda v1, v2: v1+v2)
+
+for i in ordersByStatusPerDay.collect():
+  print(i)
+
+#Total Revenue per day
+ordersRDD = sc.textFile("/loudacre/itversity/orders.txt")
+orderItemsRDD = sc.textFile("/loudacre/itversity/order_items.txt")
+
+ordersParsedRDD = ordersRDD.map(lambda rec: (rec.split(",")[0], rec))
+orderItemsParsedRDD = orderItemsRDD.map(lambda rec: (rec.split(",")[1], rec))
+
+ordersJoinOrderItems = orderItemsParsedRDD.join(ordersParsedRDD)
+ordersJoinOrderItemsMap = ordersJoinOrderItems.map(lambda t: (t[1][1].split(",")[1], float(t[1][0].split(",")[4])))
+
+revenuePerDay = ordersJoinOrderItemsMap.reduceByKey(lambda acc, value: acc + value)
+for i in revenuePerDay.collect(): print(i)
+
+#average
+#average revenue per day
+
+
+ordersRDD = sc.textFile("/loudacre/itversity/orders.txt")
+orderItemsRDD = sc.textFile("/loudacre/itversity/order_items.txt")
+
+ordersParsedRDD = ordersRDD.map(lambda rec: (rec.split(",")[0], rec))
+orderItemsParsedRDD = orderItemsRDD.map(lambda rec: (rec.split(",")[1], rec))
+
+ordersJoinOrderItems = orderItemsParsedRDD.join(ordersParsedRDD)
+ordersJoinOrderItemsMap = ordersJoinOrderItems.map(lambda t: ((t[1][1].split(",")[1], t[0]), float(t[1][0].split(",")[4])))
+
+revenuePerDayPerOrder = ordersJoinOrderItemsMap.reduceByKey(lambda acc, value: acc + value)
+revenuePerDayPerOrderMap = revenuePerDayPerOrder.map(lambda rec: (rec[0][0], rec[1]))
+
+revenuePerDay = revenuePerDayPerOrderMap.combineByKey( \
+lambda x: (x, 1), \
+lambda acc, revenue: (acc[0] + revenue, acc[1] + 1), \
+lambda total1, total2: (round(total1[0] + total2[0], 2), total1[1] + total2[1]) \
+)
+
+revenuePerDay = revenuePerDayPerOrderMap.aggregateByKey( \
+(0, 0), \
+lambda acc, revenue: (acc[0] + revenue, acc[1] + 1), \
+lambda total1, total2: (round(total1[0] + total2[0], 2), total1[1] + total2[1]) \
+)
+
+for data in revenuePerDay.collect():
+  print(data)
+
+avgRevenuePerDay = revenuePerDay.map(lambda x: (x[0], x[1][0]/x[1][1]))
+
+#Customer id with max revenue     Episode : Pyspark - 05 Max By Key (includes SQL)
+ordersRDD = sc.textFile("/loudacre/itversity/orders.txt")
+orderItemsRDD = sc.textFile("/loudacre/itversity/order_items.txt")
+
+ordersParsedRDD = ordersRDD.map(lambda rec: (rec.split(",")[0], rec))
+orderItemsParsedRDD = orderItemsRDD.map(lambda rec: (rec.split(",")[1], rec))
+
+ordersJoinOrderItems = orderItemsParsedRDD.join(ordersParsedRDD)
+ordersPerDayPerCustomer = ordersJoinOrderItems.map(lambda rec: ((rec[1][1].split(",")[1], rec[1][1].split(",")[2]), float(rec[1][0].split(",")[4])))
+revenuePerDayPerCustomer = ordersPerDayPerCustomer.reduceByKey(lambda x, y: x + y)
+
+revenuePerDayPerCustomerMap = revenuePerDayPerCustomer.map(lambda rec: (rec[0][0], (rec[0][1], rec[1])))
+topCustomerPerDaybyRevenue = revenuePerDayPerCustomerMap.reduceByKey(lambda x, y: (x if x[1] >= y[1] else y))
+
+#Using regular function
+def findMax(x, y):
+  if(x[1] >= y[1]):
+    return x
+  else:
+    return y
+
+topCustomerPerDaybyRevenue = revenuePerDayPerCustomerMap.reduceByKey(lambda x, y: findMax(x, y))
+
+# Using Hive Context
+from pyspark.sql import HiveContext
+hiveContext = HiveContext(sc)
+hiveContext.sql("set spark.sql.shuffle.partitions=10");
+
+data = hiveContext.sql(" \
+select * from ( \
+select o.order_date, o.order_customer_id, sum(oi.order_item_subtotal) order_item_subtotal \
+from orders o join order_items oi \
+on o.order_id = oi.order_item_order_id \
+group by o.order_date, o.order_customer_id) q1 \
+join \
+(select q.order_date, max(q.order_item_subtotal) order_item_subtotal \
+from (select o.order_date, o.order_customer_id, sum(oi.order_item_subtotal) order_item_subtotal \
+from orders o join order_items oi \
+on o.order_id = oi.order_item_order_id \
+group by o.order_date, o.order_customer_id) q \
+group by q.order_date) q2 \
+on q1.order_date = q2.order_date and q1.order_item_subtotal = q2.order_item_subtotal \
+order by q1.order_date")
+
+# This query works in hive
+select * from (select q.order_date, q.order_customer_id, q.order_item_subtotal, 
+max(q.order_item_subtotal) over (partition by q.order_date) max_order_item_subtotal 
+from (select o.order_date, o.order_customer_id, sum(oi.order_item_subtotal) order_item_subtotal 
+from orders o join order_items oi 
+on o.order_id = oi.order_item_order_id 
+group by o.order_date, o.order_customer_id) q) s
+where s.order_item_subtotal = s.max_order_item_subtotal
+order by s.order_date;
+
+select * from (
+select o.order_date, o.order_customer_id, sum(oi.order_item_subtotal) order_item_subtotal 
+from orders o join order_items oi 
+on o.order_id = oi.order_item_order_id 
+group by o.order_date, o.order_customer_id) q1
+join
+(select q.order_date, max(q.order_item_subtotal) order_item_subtotal
+from (select o.order_date, o.order_customer_id, sum(oi.order_item_subtotal) order_item_subtotal
+from orders o join order_items oi
+on o.order_id = oi.order_item_order_id
+group by o.order_date, o.order_customer_id) q
+group by q.order_date) q2
+on q1.order_date = q2.order_date and q1.order_item_subtotal = q2.order_item_subtotal
+order by q1.order_date;
+
+##########################################################################################
+
+# Filter data into a smaller dataset using Spark
+ordersRDD = sc.textFile("/loudacre/itversity/orders.txt")
+for i in ordersRDD.filter(lambda line: line.split(",")[3] == "COMPLETE").take(5): print(i)
+
+for i in ordersRDD.filter(lambda line: "PENDING" in line.split(",")[3]).take(5): print(i)
+
+for i in ordersRDD.filter(lambda line: int(line.split(",")[0]) > 100).take(5): print(i)
+ 
+for i in ordersRDD.filter(lambda line: int(line.split(",")[0]) > 100 or line.split(",")[3] in "PENDING").take(5): print(i)
+ 
+for i in ordersRDD.filter(lambda line: int(line.split(",")[0]) > 1000 and ("PENDING" in line.split(",")[3] or line.split(",")[3] == ("CANCELLED"))).take(5): print(i)
+ 
+for i in ordersRDD.filter(lambda line: int(line.split(",")[0]) > 1000 and line.split(",")[3] != ("COMPLETE")).take(5): print(i)
+
+#Check if there are any cancelled orders with amount greater than 1000$
+#Get only cancelled orders
+#Join orders and order items
+#Generate sum(order_item_subtotal) per order
+#Filter data which amount to greater than 1000$
+
+ordersRDD = sc.textFile("/loudacre/itversity/orders.txt")
+orderItemsRDD = sc.textFile("/loudacre/itversity/order_items.txt")
+
+ordersParsedRDD = ordersRDD.filter(lambda rec: rec.split(",")[3] in "CANCELED").map(lambda rec: (int(rec.split(",")[0]), rec))
+orderItemsParsedRDD = orderItemsRDD.map(lambda rec: (int(rec.split(",")[1]), float(rec.split(",")[4])))
+orderItemsAgg = orderItemsParsedRDD.reduceByKey(lambda acc, value: (acc + value))
+
+ordersJoinOrderItems = orderItemsAgg.join(ordersParsedRDD)
+
+for i in ordersJoinOrderItems.filter(lambda rec: rec[1][0] >= 1000).take(5): print(i)
+
+##########################################################
+
+# Write a query that produces ranked or sorted data using Spark
+
+
+
+#By key sorting and ranking
+def getAllSortByPrice(rec, bool):
+  if(bool == False):
+    x = sorted(rec[1], key = lambda k: -float(k.split(",")[4]))
+  else:
+    x = sorted(rec[1], key = lambda k: float(k.split(",")[4]))
+  return (y for y in x)
+    
+
+def getAll(rec):
+  return (x for x in rec[1])
+
+def getFirstTwo(rec):
+  x = [ ]
+  ctr = 0
+  for i in rec[1]:
+    if(ctr < 2):
+      x.append(i)
+    ctr = ctr + 1
+  return (y for y in x)
+
+def getTop(rec):
+  x = [ ]
+  max = 0
+  for i in rec[1]:
+    prodPrice = float(i.split(",")[4])
+    if(prodPrice > max):
+      max = prodPrice
+  for j in rec[1]:
+    if(float(j.split(",")[4]) == max):
+      x.append(j)
+  return (y for y in x)
+
+products = sc.textFile("/loudacre/itversity/products.txt")
+productsMap = products.map(lambda rec: (rec.split(",")[1], rec))
+productsGroupBy = productsMap.groupByKey()
+for i in productsGroupBy.collect(): print(i)
+
+#Get data sorted by product price per category
+#You can use map or flatMap, if you want to see one record per line you need to use flatMap
+#Map will return the list
+for i in productsGroupBy.map(lambda rec: sorted(rec[1], key=lambda k: float(k.split(",")[4]))).take(100): print(i)
+for i in productsGroupBy.map(lambda rec: sorted(rec[1], key=lambda k: float(k.split(",")[4]), reverse=True)).take(100): print(i)
+
+#To get topN products by price in each category
+def getTopN(rec, topN):
+  x = [ ]
+  x = list(sorted(rec[1], key=lambda k: float(k.split(",")[4]), reverse=True))
+  import itertools
+  return (y for y in list(itertools.islice(x, 0, topN)))
+
+for i in productsMap.groupByKey().flatMap(lambda x: getTopN(x, 2)).collect(): print(i)
